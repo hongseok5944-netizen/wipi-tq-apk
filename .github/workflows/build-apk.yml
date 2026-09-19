@@ -24,73 +24,6 @@ jobs:
           ref: main
           path: WIPI-Emulator
 
-      - name: Apply TQ diagnostic patch
-        working-directory: WIPI-Emulator
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          p = Path('rust/.cargo/config.toml')
-          p.write_text('''# Portable CI config. cargo-ndk supplies Android linkers.
-
-          [target.aarch64-linux-android]
-          rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
-
-          [target.x86_64-linux-android]
-          rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
-          ''', encoding='utf-8')
-
-          p = Path('rust/wipi_android/src/jni_bridge.rs')
-          s = p.read_text(encoding='utf-8')
-
-          old = '''    std::panic::set_hook(Box::new(|info| {
-              tracing::error!("panic: {info}");
-          }));'''
-          new = '''    std::panic::set_hook(Box::new(|info| {
-              tracing::error!("panic: {info}");
-              let bt = std::backtrace::Backtrace::force_capture();
-              tracing::error!("panic backtrace:\\n{bt}");
-          }));'''
-          if old not in s:
-              raise SystemExit('panic hook pattern not found')
-          s = s.replace(old, new, 1)
-
-          old = '''    if let Ok(key) = env.get_string(&key) {
-              session::key_down(&String::from(key));
-          }'''
-          new = '''    if let Ok(key) = env.get_string(&key) {
-              let key = String::from(key);
-              let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                  session::key_down(&key);
-              }));
-              if result.is_err() {
-                  tracing::error!("TQ diagnostic: panic caught in nativeKeyDown for key={key:?}");
-              }
-          }'''
-          if old not in s:
-              raise SystemExit('nativeKeyDown pattern not found')
-          s = s.replace(old, new, 1)
-
-          old = '''    if let Ok(key) = env.get_string(&key) {
-              session::key_up(&String::from(key));
-          }'''
-          new = '''    if let Ok(key) = env.get_string(&key) {
-              let key = String::from(key);
-              let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                  session::key_up(&key);
-              }));
-              if result.is_err() {
-                  tracing::error!("TQ diagnostic: panic caught in nativeKeyUp for key={key:?}");
-              }
-          }'''
-          if old not in s:
-              raise SystemExit('nativeKeyUp pattern not found')
-          s = s.replace(old, new, 1)
-
-          p.write_text(s, encoding='utf-8')
-          PY
-
       - name: Set up Java 17
         uses: actions/setup-java@v5
         with:
@@ -119,6 +52,18 @@ jobs:
         shell: bash
         run: cargo install cargo-ndk --version 3.5.4 --locked
 
+      - name: Prepare portable Rust config
+        working-directory: WIPI-Emulator
+        shell: bash
+        run: |
+          cat > rust/.cargo/config.toml <<'EOF'
+          [target.aarch64-linux-android]
+          rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+          [target.x86_64-linux-android]
+          rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+          EOF
+
       - name: Build Rust JNI
         working-directory: WIPI-Emulator/rust
         shell: bash
@@ -140,7 +85,8 @@ jobs:
       - name: Build Android APK
         working-directory: WIPI-Emulator/android
         shell: bash
-        run: gradle --no-daemon :app:assembleDebug
+        run: |
+          gradle --no-daemon :app:assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
