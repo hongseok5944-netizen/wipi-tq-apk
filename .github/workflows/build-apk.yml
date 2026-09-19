@@ -31,53 +31,84 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          # 1) The checked-in config contains developer-specific macOS NDK paths.
-          # cargo-ndk supplies the correct linker/toolchain in CI, so remove the
-          # machine-specific target linker/env overrides while retaining 16 KiB pages.
           p = Path('rust/.cargo/config.toml')
-          p.write_text('''# CI/local portable config. cargo-ndk supplies Android linkers.\n\n[target.aarch64-linux-android]\nrustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]\n\n[target.x86_64-linux-android]\nrustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]\n''', encoding='utf-8')
+          p.write_text('''# Portable CI config. cargo-ndk supplies Android linkers.
 
-          # 2) Add a backtrace to the existing panic hook.
+          [target.aarch64-linux-android]
+          rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+          [target.x86_64-linux-android]
+          rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+          ''', encoding='utf-8')
+
           p = Path('rust/wipi_android/src/jni_bridge.rs')
           s = p.read_text(encoding='utf-8')
-          old = '''    std::panic::set_hook(Box::new(|info| {\n        tracing::error!("panic: {info}");\n    }));'''
-          new = '''    std::panic::set_hook(Box::new(|info| {\n        tracing::error!("panic: {info}");\n        let bt = std::backtrace::Backtrace::force_capture();\n        tracing::error!("panic backtrace:\\n{bt}");\n    }));'''
+
+          old = '''    std::panic::set_hook(Box::new(|info| {
+              tracing::error!("panic: {info}");
+          }));'''
+          new = '''    std::panic::set_hook(Box::new(|info| {
+              tracing::error!("panic: {info}");
+              let bt = std::backtrace::Backtrace::force_capture();
+              tracing::error!("panic backtrace:\\n{bt}");
+          }));'''
           if old not in s:
               raise SystemExit('panic hook pattern not found')
           s = s.replace(old, new, 1)
 
-          # 3) Catch synchronous panic at the JNI input boundary so the Android
-          # process does not immediately die. This is intentionally diagnostic:
-          # the panic still gets logged with a full backtrace.
-          old = '''    if let Ok(key) = env.get_string(&key) {\n        session::key_down(&String::from(key));\n    }'''
-          new = '''    if let Ok(key) = env.get_string(&key) {\n        let key = String::from(key);\n        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {\n            session::key_down(&key);\n        }));\n        if result.is_err() {\n            tracing::error!("TQ diagnostic: panic caught in nativeKeyDown for key={key:?}");\n        }\n    }'''
+          old = '''    if let Ok(key) = env.get_string(&key) {
+              session::key_down(&String::from(key));
+          }'''
+          new = '''    if let Ok(key) = env.get_string(&key) {
+              let key = String::from(key);
+              let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                  session::key_down(&key);
+              }));
+              if result.is_err() {
+                  tracing::error!("TQ diagnostic: panic caught in nativeKeyDown for key={key:?}");
+              }
+          }'''
           if old not in s:
               raise SystemExit('nativeKeyDown pattern not found')
           s = s.replace(old, new, 1)
 
-          old = '''    if let Ok(key) = env.get_string(&key) {\n        session::key_up(&String::from(key));\n    }'''
-          new = '''    if let Ok(key) = env.get_string(&key) {\n        let key = String::from(key);\n        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {\n            session::key_up(&key);\n        }));\n        if result.is_err() {\n            tracing::error!("TQ diagnostic: panic caught in nativeKeyUp for key={key:?}");\n        }\n    }'''
+          old = '''    if let Ok(key) = env.get_string(&key) {
+              session::key_up(&String::from(key));
+          }'''
+          new = '''    if let Ok(key) = env.get_string(&key) {
+              let key = String::from(key);
+              let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                  session::key_up(&key);
+              }));
+              if result.is_err() {
+                  tracing::error!("TQ diagnostic: panic caught in nativeKeyUp for key={key:?}");
+              }
+          }'''
           if old not in s:
               raise SystemExit('nativeKeyUp pattern not found')
           s = s.replace(old, new, 1)
+
           p.write_text(s, encoding='utf-8')
           PY
 
       - name: Set up Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK / NDK
+      - name: Configure Android SDK
         shell: bash
         run: |
-          sdkmanager "platform-tools" "platforms;android-36" "build-tools;35.0.0" "ndk;${ANDROID_NDK_VERSION}"
-          yes | sdkmanager --licenses >/dev/null || true
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          set -e
+          SDKMANAGER="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "${ANDROID_SDK_ROOT}/cmdline-tools" -path '*/bin/sdkmanager' -type f | head -n 1)"
+          fi
+          echo "Using sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;35.0.0" "ndk;${ANDROID_NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
